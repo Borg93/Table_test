@@ -160,15 +160,21 @@ class TipsDETR(nn.Module):
 
 
 @torch.no_grad()
-def post_process(outputs, target_sizes, topk=300):
-    """outputs -> per-image dict(scores, labels, boxes[xyxy abs]). target_sizes (B,2)=(h,w)."""
+def post_process(outputs, target_sizes, topk=None):
+    """outputs -> per-image dict(scores, labels, boxes[xyxy abs]). target_sizes (B,2)=(h,w).
+
+    One label per query (argmax over classes), so a single box is never emitted under
+    two labels (which would double-count a band as both a row and a column). topk
+    defaults to num_queries (no hard cap) so dense pages aren't truncated.
+    """
     from .box_ops import box_cxcywh_to_xyxy
     logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
     prob = logits.sigmoid()
     bs, nq, nc = prob.shape
-    flat = prob.view(bs, -1)
-    scores, idx = flat.topk(min(topk, nq * nc), dim=1)
-    qidx, labels = idx // nc, idx % nc
+    scores_q, labels_q = prob.max(-1)                      # (bs, nq) best class per query
+    k = min(topk or nq, nq)
+    scores, qidx = scores_q.topk(k, dim=1)
+    labels = labels_q.gather(1, qidx)
     boxes = box_cxcywh_to_xyxy(boxes)
     boxes = torch.gather(boxes, 1, qidx.unsqueeze(-1).expand(-1, -1, 4))
     h, w = target_sizes.unbind(1)

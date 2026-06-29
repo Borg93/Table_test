@@ -328,6 +328,19 @@ def _col_band(table: Table, cc: int):
     return min(c.bbox[0] for c in cov), max(c.bbox[2] for c in cov)
 
 
+def _span_box(table: Table, cell: Cell):
+    """Spanning-cell box = union of the row/col bands it logically covers, so the box
+    geometrically spans them and the decoder recovers rowspan/colspan by overlap.
+    Falls back to the cell's own bbox if bands are unavailable."""
+    rb = [b for b in (_row_band(table, r) for r in range(cell.row, cell.row + cell.rowspan)) if b]
+    cb = [b for b in (_col_band(table, c) for c in range(cell.col, cell.col + cell.colspan)) if b]
+    if not rb or not cb:
+        return cell.bbox
+    y1 = min(b[0] for b in rb); y2 = max(b[1] for b in rb)
+    x1 = min(b[0] for b in cb); x2 = max(b[1] for b in cb)
+    return (x1, y1, x2, y2)
+
+
 def page_tatr_instances(page: Page) -> list[tuple[str, tuple[int, int, int, int]]]:
     """(category, pixel bbox) for every row-band, column-band and spanning cell.
 
@@ -349,7 +362,7 @@ def page_tatr_instances(page: Page) -> list[tuple[str, tuple[int, int, int, int]
                 inst.append(("table column", (band[0], ty1, band[1], ty2)))
         for c in table.cells:
             if c.rowspan > 1 or c.colspan > 1:
-                inst.append(("table spanning cell", c.bbox))
+                inst.append(("table spanning cell", _span_box(table, c)))
     return inst
 
 
@@ -472,7 +485,7 @@ def page_to_coco_tatr_entries(page: Page, image_id: int, ann_id_start: int):
                 anns.append(_coco_box(aid, image_id, 2, band[0], ty1, band[1], ty2)); aid += 1
         for c in table.cells:
             if c.rowspan > 1 or c.colspan > 1:
-                x1, y1, x2, y2 = c.bbox
+                x1, y1, x2, y2 = _span_box(table, c)
                 anns.append(_coco_box(aid, image_id, 3, x1, y1, x2, y2)); aid += 1
     return image, anns, aid
 

@@ -34,14 +34,16 @@ from .model import TipsDETR, TipsDETRConfig
 
 def load_init_weights(model, path):
     """Load a pretrained checkpoint for fine-tuning; skip shape-mismatched keys
-    (e.g. the class head when the class count changes). Returns (kept, skipped)."""
+    (e.g. the class head when the class count changes).
+    Returns (kept, missing) where `missing` = model tensors that got NO weight
+    (left at init) — so a partial/arch-mismatched load is visible, not silent."""
     sd = torch.load(path, map_location="cpu")
     sd = sd.get("model", sd)
     msd = model.state_dict()
     keep = {k: v for k, v in sd.items() if k in msd and v.shape == msd[k].shape}
-    skipped = [k for k in sd if k not in keep]
+    missing = [k for k in msd if k not in keep]
     model.load_state_dict(keep, strict=False)
-    return len(keep), skipped
+    return len(keep), missing
 
 
 def move(targets, device):
@@ -148,10 +150,16 @@ def main():
     model.to(device)
     criterion.to(device)
     if args.init_weights:
-        kept, skipped = load_init_weights(model, args.init_weights)
+        kept, missing = load_init_weights(model, args.init_weights)
         if local_rank == 0:
-            print(f"init from {args.init_weights}: loaded {kept} tensors, "
-                  f"reset {len(skipped)} (e.g. class head on class-count change)")
+            print(f"init from {args.init_weights}: loaded {kept} tensors; "
+                  f"{len(missing)} left at init")
+            non_head = [m for m in missing if "class_embed" not in m]
+            if non_head:
+                print(f"  WARNING: {len(non_head)} NON-class-head tensors not loaded "
+                      f"(backbone/arch mismatch?): e.g. {non_head[:3]}")
+            elif missing:
+                print(f"  (class head reset for the new class count: {len(missing)} tensors)")
     # `model` always refers to the unwrapped TipsDETR (for .state_dict());
     # `train_model` is what we call forward on (DDP-wrapped under torchrun).
     train_model = (torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
@@ -203,17 +211,22 @@ def main():
             torch.save(ckpt, out_dir / "last.pth")
             if (epoch + 1) % 10 == 0:
                 torch.save(ckpt, out_dir / f"epoch{epoch+1}.pth")
-            if val_dl is not None and (epoch + 1) % args.eval_every == 0:
+            is_last = epoch == args.epochs - 1
+            if val_dl is not None and ((epoch + 1) % args.eval_every == 0 or is_last):
                 try:
                     teds, n = evaluate_teds(model, val_dl, val_class_names,
-                                        device, args.score_thresh)
+                                            device, args.score_thresh)
                     print(f"ep{epoch} val TEDS={teds:.4f} (structure-only, {n} imgs)")
-                    if teds > best_teds:
+                    if n > 0 and teds > best_teds:
                         best_teds = teds
                         torch.save(ckpt, out_dir / "best.pth")
                         print(f"ep{epoch} new best TEDS={teds:.4f} -> best.pth")
                 except SystemExit as e:        # apted missing -> eval_teds exits
                     print(f"ep{epoch} TEDS skipped: {e}")
+        # rank-0 eval/save can be slow; barrier keeps DDP ranks in lockstep so
+        # other ranks don't start the next epoch's all-reduce and time out waiting.
+        if ddp:
+            torch.distributed.barrier()
     if ddp:
         torch.distributed.destroy_process_group()
 

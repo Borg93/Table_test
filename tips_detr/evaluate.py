@@ -53,7 +53,9 @@ def evaluate_teds(model, loader, class_names, device, score_thresh: float = 0.5)
             scores.append(teds(pred_html, gt_html, structure_only=True))
     if was_training:
         model.train()
-    return (sum(scores) / len(scores) if scores else 0.0), len(scores)
+    # nan (not 0.0) for an empty loader, so a misconfigured val set can't masquerade
+    # as a real zero score or contaminate best-checkpoint selection.
+    return (sum(scores) / len(scores) if scores else float("nan")), len(scores)
 
 
 def main():
