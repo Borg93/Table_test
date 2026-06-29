@@ -79,6 +79,12 @@ class SetCriterion(nn.Module):
                     losses[f"{k}_{i}"] = v
         return losses
 
-    def total(self, losses):
-        return sum(losses[k] * self.weight_dict[k.rsplit("_", 1)[0] if k[-1].isdigit() else k]
-                   for k in losses if (k.rsplit("_", 1)[0] if k[-1].isdigit() else k) in self.weight_dict)
+    @staticmethod
+    def _base(key: str) -> str:
+        """Strip an aux-layer suffix: 'loss_ce_3' -> 'loss_ce'."""
+        return key.rsplit("_", 1)[0] if key[-1].isdigit() else key
+
+    def total(self, losses: dict) -> torch.Tensor:
+        terms = [losses[k] * self.weight_dict[self._base(k)]
+                 for k in losses if self._base(k) in self.weight_dict]
+        return torch.stack(terms).sum()

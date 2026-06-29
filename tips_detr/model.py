@@ -17,9 +17,11 @@ spanning-cell boxes fix merges. (Switch to per-cell with --coco-mode cells.)
 from __future__ import annotations
 
 import copy
+import math
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -69,7 +71,9 @@ class TipsBackbone(nn.Module):
         from tips_encoder import TipsEncoder  # noqa: E402
         self.encoder = TipsEncoder(variant=variant, image_size=image_size, freeze=True,
                                    npz_vision_ckpt=npz_vision_ckpt, taps=tuple(taps))
-        self.embed_dim = self.encoder.embed_dim
+        embed_dim = self.encoder.embed_dim
+        assert embed_dim is not None, "TIPS encoder exposed no embed_dim"
+        self.embed_dim: int = embed_dim
         self.n_taps = len(taps)
 
     def forward(self, x):
@@ -96,7 +100,7 @@ class TipsDETRConfig:
     tips_variant: str = "L"
     image_size: int = 1568
     tips_taps: tuple = (5, 11, 17, 23)
-    npz_vision_ckpt: str = None
+    npz_vision_ckpt: str | None = None
     aux_loss: bool = True
 
 
@@ -104,6 +108,7 @@ class TipsDETR(nn.Module):
     def __init__(self, cfg: TipsDETRConfig):
         super().__init__()
         self.cfg = cfg
+        self.backbone: StubBackbone | TipsBackbone
         if cfg.backbone == "stub":
             self.backbone = StubBackbone(cfg.hidden_dim, len(cfg.tips_taps))
         else:
@@ -120,10 +125,11 @@ class TipsDETR(nn.Module):
         n_pred = cfg.dec_layers
         class_embed = nn.Linear(cfg.hidden_dim, cfg.num_classes)
         bbox_embed = MLP(cfg.hidden_dim, cfg.hidden_dim, 4, 3)
-        prior = torch.log(torch.tensor((1 - 0.01) / 0.01))
-        nn.init.constant_(class_embed.bias, -prior)             # focal bias prior
-        nn.init.constant_(bbox_embed.layers[-1].weight, 0.0)
-        nn.init.constant_(bbox_embed.layers[-1].bias, 0.0)
+        prior = math.log((1 - 0.01) / 0.01)                     # focal bias prior (float)
+        nn.init.constant_(class_embed.bias, -prior)
+        bbox_last = cast(nn.Linear, bbox_embed.layers[-1])
+        nn.init.constant_(bbox_last.weight, 0.0)
+        nn.init.constant_(bbox_last.bias, 0.0)
         self.class_embed = nn.ModuleList([copy.deepcopy(class_embed) for _ in range(n_pred)])
         self.bbox_embed = nn.ModuleList([copy.deepcopy(bbox_embed) for _ in range(n_pred)])
         self.transformer.bbox_embed = self.bbox_embed           # enables iterative refine

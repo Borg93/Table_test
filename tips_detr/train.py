@@ -84,8 +84,10 @@ def main():
     model, criterion = build(args, train_ds.num_classes)
     model.to(device)
     criterion.to(device)
-    if ddp:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    # `model` always refers to the unwrapped TipsDETR (for .state_dict());
+    # `train_model` is what we call forward on (DDP-wrapped under torchrun).
+    train_model = (torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+                   if ddp else model)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_train = sum(p.numel() for p in trainable)
@@ -99,14 +101,14 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(args.epochs):
-        model.train()
+        train_model.train()
         if sampler is not None:
             sampler.set_epoch(epoch)
         for it, (images, targets) in enumerate(train_dl):
             images = images.to(device, non_blocking=True)
             targets = move(targets, device)
             with torch.cuda.amp.autocast(enabled=args.amp):
-                outputs = model(images)
+                outputs = train_model(images)
                 losses = criterion(outputs, targets)
                 loss = criterion.total(losses)
             opt.zero_grad()
@@ -122,7 +124,7 @@ def main():
                                  if not k[-1].isdigit())
                 print(f"ep{epoch} it{it}/{len(train_dl)} loss={loss.item():.3f} {terms}")
         if local_rank == 0:
-            ckpt = {"model": (model.module if ddp else model).state_dict(),
+            ckpt = {"model": model.state_dict(),
                     "epoch": epoch, "cfg": vars(args)}
             torch.save(ckpt, out_dir / "last.pth")
             if (epoch + 1) % 10 == 0:

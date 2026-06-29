@@ -23,11 +23,12 @@ def main():
     criterion = SetCriterion(cfg.num_classes, matcher,
                              {"loss_ce": 2.0, "loss_bbox": 5.0, "loss_giou": 2.0})
 
-    b, hw = 2, cfg.image_size
+    b: int = 2
+    hw: int = cfg.image_size
     images = torch.randn(b, 3, hw, hw)
     targets = []
-    for _ in range(b):
-        n = torch.randint(3, 8, (1,)).item()
+    for k in range(b):
+        n = 4 + k                       # deterministic 4, 5 boxes
         cxcy = torch.rand(n, 2) * 0.6 + 0.2
         wh = torch.rand(n, 2) * 0.2 + 0.05
         targets.append({"boxes": torch.cat([cxcy, wh], 1),

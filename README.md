@@ -82,7 +82,11 @@ python data/page_to_targets.py *.xml --jsonl tables.jsonl --recipe recipe.json  
 python data/page_to_targets.py *.xml --coco train.json --coco-mode tatr          # Exp B: TipsDETR COCO
 python -m tips_detr.smoke                                                         # Exp B: model wiring
 python eval/eval_teds.py --self-test                                             # needs apted
+pyrefly check                                                                     # static types: 0 errors
 ```
+
+Verified two ways: it **runs** (the self-test / smoke / integration above all execute
+and pass) and it **type-checks** (`pyrefly check` → 0 errors; config in `pyrefly.toml`).
 
 ## Status / next
 

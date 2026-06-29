@@ -198,10 +198,11 @@ def parse_page(xml_path_or_string: str, is_string: bool = False) -> Page:
 # --------------------------------------------------------------------------- #
 # Grid building (resolve spans into an occupancy map)
 # --------------------------------------------------------------------------- #
-def build_grid(table: Table):
+def build_grid(table: Table) -> list[list[tuple[str | None, "Cell | None"]]]:
     """Return a 2D list grid[r][c] = ('origin'|'cover'|None, cell)."""
     n_r, n_c = table.n_rows, table.n_cols
-    grid = [[(None, None) for _ in range(n_c)] for _ in range(n_r)]
+    grid: list[list[tuple[str | None, Cell | None]]] = \
+        [[(None, None) for _ in range(n_c)] for _ in range(n_r)]
     for cell in table.cells:
         for dr in range(cell.rowspan):
             for dc in range(cell.colspan):
@@ -225,6 +226,7 @@ def to_html(table: Table) -> str:
             if kind == "cover":
                 continue
             if kind == "origin":
+                assert cell is not None
                 attrs = ""
                 if cell.rowspan > 1:
                     attrs += f' rowspan="{cell.rowspan}"'
@@ -245,8 +247,10 @@ def to_otsl(table: Table) -> str:
         for c in range(table.n_cols):
             kind, cell = grid[r][c]
             if kind == "origin":
+                assert cell is not None
                 toks.append("fcel" if cell.text else "ecel")
             elif kind == "cover":
+                assert cell is not None
                 same_row = cell.row == r
                 same_col = cell.col == c
                 if not same_row and not same_col:

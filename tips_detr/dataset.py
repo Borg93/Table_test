@@ -25,7 +25,7 @@ IMAGE_STD = (1.0, 1.0, 1.0)
 
 def _to_normalized_chw(img: Image.Image, size: int) -> torch.Tensor:
     """PIL RGB -> normalized CHW float tensor, square-resized (torchvision-free)."""
-    img = img.resize((size, size), Image.BILINEAR)
+    img = img.resize((size, size), Image.Resampling.BILINEAR)
     arr = torch.from_numpy(np.asarray(img, dtype=np.float32) / 255.0).permute(2, 0, 1)
     mean = torch.tensor(IMAGE_MEAN).view(3, 1, 1)
     std = torch.tensor(IMAGE_STD).view(3, 1, 1)
@@ -49,8 +49,8 @@ class CocoTableDataset(Dataset):
     def __len__(self):
         return len(self.images)
 
-    def __getitem__(self, i):
-        info = self.images[i]
+    def __getitem__(self, index):
+        info = self.images[index]
         img = Image.open(self.images_root / info["file_name"]).convert("RGB")
         w0, h0 = img.width, img.height
         x = _to_normalized_chw(img, self.image_size)

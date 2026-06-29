@@ -1,0 +1,18 @@
+# pyrefly static type-check config.
+#   pip install pyrefly && pyrefly check
+# torch is type-checked normally; optional/uninstalled deps (and the runtime
+# sys.path-injected TIPS encoder) are treated as untyped so checks stay green
+# without a full GPU environment.
+project-includes = ["data", "eval", "tips_detr", "models", "exp_b_rfdetr"]
+search-path = [".", "models"]
+
+# Optional third-party deps that are only present on the GPU/training box.
+replace-imports-with-any = [
+  "apted",
+  "apted.*",
+  "transformers",
+  "tips",
+  "tips.*",
+  "torchvision",
+  "torchvision.*",
+]
