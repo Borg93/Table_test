@@ -361,6 +361,61 @@ def build_coco(pages: list[Page], category_name: str = "cell") -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# COCO TATR-style targets (Exp B, ZERO fork): row-band + column-band + spanning
+# cell as separate classes. Detect them with STOCK RF-DETR, intersect row x col
+# to recover the logical grid + spans. No custom head, no dataloader change.
+# --------------------------------------------------------------------------- #
+def _table_bbox(table: Table):
+    bs = [c.bbox for c in table.cells]
+    return (min(b[0] for b in bs), min(b[1] for b in bs),
+            max(b[2] for b in bs), max(b[3] for b in bs))
+
+
+def _coco_box(aid, image_id, cat, x1, y1, x2, y2):
+    w, h = x2 - x1, y2 - y1
+    return {"id": aid, "image_id": image_id, "category_id": cat,
+            "bbox": [x1, y1, w, h], "area": w * h, "iscrowd": 0,
+            "segmentation": [[x1, y1, x2, y1, x2, y2, x1, y2]]}
+
+
+def page_to_coco_tatr_entries(page: Page, image_id: int, ann_id_start: int):
+    """Emit row-band (cat 1), column-band (cat 2), spanning-cell (cat 3) boxes."""
+    image = {"id": image_id, "file_name": page.image,
+             "width": page.width, "height": page.height}
+    anns, aid = [], ann_id_start
+    for table in page.tables:
+        if not table.cells:
+            continue
+        tx1, ty1, tx2, ty2 = _table_bbox(table)
+        for r in range(table.n_rows):
+            cov = [c for c in table.cells if c.row <= r < c.row + c.rowspan]
+            if cov:
+                y1 = min(c.bbox[1] for c in cov); y2 = max(c.bbox[3] for c in cov)
+                anns.append(_coco_box(aid, image_id, 1, tx1, y1, tx2, y2)); aid += 1
+        for cc in range(table.n_cols):
+            cov = [c for c in table.cells if c.col <= cc < c.col + c.colspan]
+            if cov:
+                x1 = min(c.bbox[0] for c in cov); x2 = max(c.bbox[2] for c in cov)
+                anns.append(_coco_box(aid, image_id, 2, x1, ty1, x2, ty2)); aid += 1
+        for c in table.cells:
+            if c.rowspan > 1 or c.colspan > 1:
+                x1, y1, x2, y2 = c.bbox
+                anns.append(_coco_box(aid, image_id, 3, x1, y1, x2, y2)); aid += 1
+    return image, anns, aid
+
+
+def build_coco_tatr(pages: list[Page]) -> dict:
+    images, annotations, aid = [], [], 1
+    for i, page in enumerate(pages, start=1):
+        img, anns, aid = page_to_coco_tatr_entries(page, i, aid)
+        images.append(img)
+        annotations.extend(anns)
+    cats = [{"id": 1, "name": "table row"}, {"id": 2, "name": "table column"},
+            {"id": 3, "name": "table spanning cell"}]
+    return {"images": images, "annotations": annotations, "categories": cats, "type": "instances"}
+
+
+# --------------------------------------------------------------------------- #
 # Self-test (synthetic PAGE XML, both flavors) -- runnable with no external data
 # --------------------------------------------------------------------------- #
 _TRANSKRIBUS = """<?xml version="1.0"?>
@@ -446,6 +501,15 @@ def _self_test():
     assert a0["bbox"] == [0, 0, 500, 100] and a0["logic_axis"] == [[0, 1, 0, 0]], a0
     assert len(a0["segmentation"][0]) == 8  # 4-point quad
     print("COCO :", len(coco["images"]), "images,", len(coco["annotations"]), "cell anns; ann[0].logic_axis", a0["logic_axis"])
+    # COCO TATR emitter (row/col/spanning-cell, zero-fork RF-DETR)
+    tatr = build_coco_tatr([p1, p2])
+    cats = {c["category_id"] for c in tatr["annotations"]}
+    n_rows = sum(c["category_id"] == 1 for c in tatr["annotations"])
+    n_cols = sum(c["category_id"] == 2 for c in tatr["annotations"])
+    n_span = sum(c["category_id"] == 3 for c in tatr["annotations"])
+    # transkribus: 2 rows + 3 cols + 1 span(c00) ; prima: 2 rows + 2 cols + 1 span(r0)
+    assert (n_rows, n_cols, n_span) == (4, 5, 2), (n_rows, n_cols, n_span)
+    print("TATR :", n_rows, "row +", n_cols, "col +", n_span, "spanning-cell boxes (classes", sorted(cats), ")")
     print("\nAll self-tests passed.")
 
 
@@ -454,6 +518,9 @@ def main():
     ap.add_argument("page_xml", nargs="*", help="One or more Transkribus/PRImA PAGE XML files")
     ap.add_argument("--jsonl", help="Append ShareGPT samples (Exp A: LocateAnything) to this JSONL file")
     ap.add_argument("--coco", help="Write COCO detection json (Exp B: RF-DETR/TIPS) over all inputs")
+    ap.add_argument("--coco-mode", choices=["cells", "tatr"], default="cells",
+                    help="cells = one box/cell + logic_axis (needs logical head); "
+                         "tatr = row/column/spanning-cell boxes (stock RF-DETR, zero fork)")
     ap.add_argument("--image-root", default="", help="Prefix prepended to image paths")
     ap.add_argument("--self-test", action="store_true", help="Run on synthetic PAGE XML and exit")
     args = ap.parse_args()
@@ -470,10 +537,11 @@ def main():
         pages.append(page)
 
     if args.coco:
-        coco = build_coco(pages)
+        coco = build_coco_tatr(pages) if args.coco_mode == "tatr" else build_coco(pages)
         with open(args.coco, "w", encoding="utf-8") as f:
             json.dump(coco, f, ensure_ascii=False)
-        print(f"# wrote {args.coco}: {len(coco['images'])} images, {len(coco['annotations'])} cell anns", file=sys.stderr)
+        print(f"# wrote {args.coco} ({args.coco_mode}): {len(coco['images'])} images, "
+              f"{len(coco['annotations'])} anns", file=sys.stderr)
         return
 
     for page in pages:
