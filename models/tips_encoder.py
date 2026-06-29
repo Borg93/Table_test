@@ -97,8 +97,11 @@ def build_simple_pyramid(grid_feats: torch.Tensor) -> dict[str, torch.Tensor]:
     """ViTDet-style simple feature pyramid from a single /14 token grid.
 
     Strides ~ {4,8,16,32} via transpose-conv / pooling. Feed these to a
-    Deformable-DETR / Mask2Former decoder. (Stub: swap in a learned ViT-Adapter
-    for best results; this is the minimal interpolation-based version.)
+    Deformable-DETR decoder. This is a minimal interpolation-based stub --
+    for the real thing use RF-DETR's learned `MultiScaleProjector`
+    (src/rfdetr/models/backbone/projector.py), which takes multiple tapped ViT
+    layers and is what Exp B should adopt; pass this encoder's multi-layer
+    output (taps=(-1,-7,-13,...)) into it.
     """
     b, c, h, w = grid_feats.shape
     return {
