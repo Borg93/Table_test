@@ -1,0 +1,8 @@
+{
+  "handwritten_tables": {
+    "annotation": "data/annotations/tables_tatr.jsonl",
+    "root": "/data/page_images/",
+    "repeat_time": 1.0,
+    "data_augment": true
+  }
+}

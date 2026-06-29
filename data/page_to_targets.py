@@ -267,17 +267,38 @@ def _norm(v: int, size: int) -> int:
     return max(0, min(1000, round(v / size * 1000)))
 
 
+# --------------------------------------------------------------------------- #
+# LocateAnything grounding format (Exp A)
+#
+# Exact format from NVlabs/Eagle "Embodied" (DATA_PREPARATION.md + train/tools.py
+# `_BOX_RE = re.compile(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>")`):
+#   - coordinates are normalized integer TOKENS in [0,1000]:
+#         <box><x1><y1><x2><y2></box>
+#   - each instance is "<ref>label</ref><box>...</box>" (ref repeated per box, as in
+#     the COCO detection example); the gpt value is used verbatim as the label.
+#   - the detection prompt lists categories joined by "</c>"; categories with no
+#     instances are simply omitted from the answer; a fully empty answer -> "<box>none</box>".
+# --------------------------------------------------------------------------- #
+TATR_CATEGORIES = ["table row", "table column", "table spanning cell"]
+
+
+def _box_tokens(box, page: Page) -> str:
+    x1, y1, x2, y2 = box
+    return (f"<box><{_norm(x1, page.width)}><{_norm(y1, page.height)}>"
+            f"<{_norm(x2, page.width)}><{_norm(y2, page.height)}></box>")
+
+
 def to_detection(table: Table, page: Page) -> tuple[str, list[dict]]:
-    """LocateAnything-style grounding string + structured list (boxes in [0,1000])."""
+    """Per-cell grounding string (ref carries logical pos) + structured list."""
     spans, structured = [], []
     for cell in sorted(table.cells, key=lambda x: (x.row, x.col)):
         x1, y1, x2, y2 = cell.bbox
         b = [_norm(x1, page.width), _norm(y1, page.height),
              _norm(x2, page.width), _norm(y2, page.height)]
-        spans.append(
-            f"<cell r={cell.row} c={cell.col} rs={cell.rowspan} cs={cell.colspan}>"
-            f"[{b[0]},{b[1]},{b[2]},{b[3]}]</cell>"
-        )
+        label = f"row {cell.row} col {cell.col}"
+        if cell.rowspan > 1 or cell.colspan > 1:
+            label += f" rowspan {cell.rowspan} colspan {cell.colspan}"
+        spans.append(f"<ref>{label}</ref>{_box_tokens(cell.bbox, page)}")
         structured.append({"row": cell.row, "col": cell.col,
                            "rowspan": cell.rowspan, "colspan": cell.colspan,
                            "box_1000": b, "bbox_px": [x1, y1, x2, y2],
@@ -285,39 +306,89 @@ def to_detection(table: Table, page: Page) -> tuple[str, list[dict]]:
     return "".join(spans), structured
 
 
-# --------------------------------------------------------------------------- #
-# ShareGPT JSONL samples (one per task variant)
-# --------------------------------------------------------------------------- #
-def build_samples(page: Page) -> list[dict]:
-    samples = []
-    for ti, table in enumerate(page.tables):
-        det_str, _ = to_detection(table, page)
-        img = page.image
-        samples.append({
-            "task": "detection",
-            "image": img,
-            "conversations": [
-                {"from": "human", "value": "<image-1>\nDetect every table cell and give its row, col, rowspan, colspan."},
-                {"from": "gpt", "value": det_str},
-            ],
-        })
-        samples.append({
-            "task": "otsl",
-            "image": img,
-            "conversations": [
-                {"from": "human", "value": "<image-1>\nOutput the table structure in OTSL."},
-                {"from": "gpt", "value": to_otsl(table)},
-            ],
-        })
-        samples.append({
-            "task": "html",
-            "image": img,
-            "conversations": [
-                {"from": "human", "value": "<image-1>\nReconstruct the table as HTML."},
-                {"from": "gpt", "value": to_html(table)},
-            ],
-        })
-    return samples
+def _row_band(table: Table, r: int):
+    """y-extent of row r from non-spanning cells (fallback: any covering cell)."""
+    single = [c for c in table.cells if c.row == r and c.rowspan == 1]
+    cov = single or [c for c in table.cells if c.row <= r < c.row + c.rowspan]
+    if not cov:
+        return None
+    return min(c.bbox[1] for c in cov), max(c.bbox[3] for c in cov)
+
+
+def _col_band(table: Table, cc: int):
+    """x-extent of column cc from non-spanning cells (fallback: any covering cell)."""
+    single = [c for c in table.cells if c.col == cc and c.colspan == 1]
+    cov = single or [c for c in table.cells if c.col <= cc < c.col + c.colspan]
+    if not cov:
+        return None
+    return min(c.bbox[0] for c in cov), max(c.bbox[2] for c in cov)
+
+
+def page_tatr_instances(page: Page) -> list[tuple[str, tuple[int, int, int, int]]]:
+    """(category, pixel bbox) for every row-band, column-band and spanning cell.
+
+    Band extents come from non-spanning cells so a wide spanning cell does not
+    inflate (and duplicate) the columns/rows it covers.
+    """
+    inst = []
+    for table in page.tables:
+        if not table.cells:
+            continue
+        tx1, ty1, tx2, ty2 = _table_bbox(table)
+        for r in range(table.n_rows):
+            band = _row_band(table, r)
+            if band:
+                inst.append(("table row", (tx1, band[0], tx2, band[1])))
+        for cc in range(table.n_cols):
+            band = _col_band(table, cc)
+            if band:
+                inst.append(("table column", (band[0], ty1, band[1], ty2)))
+        for c in table.cells:
+            if c.rowspan > 1 or c.colspan > 1:
+                inst.append(("table spanning cell", c.bbox))
+    return inst
+
+
+def to_locateanything(page: Page, mode: str = "tatr") -> dict:
+    """One ShareGPT detection sample in LocateAnything's exact grounding format.
+
+    mode="tatr"  : categories {table row, table column, table spanning cell};
+                   intersect detected rows x columns downstream for the logical grid.
+    mode="cells" : one box per cell, the logical (row,col[,span]) carried in the ref.
+    """
+    if mode == "tatr":
+        prompt = ("Locate all the instances that matches the following description: "
+                  + "</c>".join(TATR_CATEGORIES) + ".")
+        by_cat = {c: [] for c in TATR_CATEGORIES}
+        for cat, box in page_tatr_instances(page):
+            by_cat[cat].append(box)
+        parts = [f"<ref>{cat}</ref>{_box_tokens(box, page)}"
+                 for cat in TATR_CATEGORIES for box in by_cat[cat]]
+    elif mode == "cells":
+        prompt = ("Detect every table cell and label each with its grid "
+                  "position as 'row R col C'.")
+        parts = []
+        for table in page.tables:
+            for cell in sorted(table.cells, key=lambda x: (x.row, x.col)):
+                label = f"row {cell.row} col {cell.col}"
+                if cell.rowspan > 1 or cell.colspan > 1:
+                    label += f" rowspan {cell.rowspan} colspan {cell.colspan}"
+                parts.append(f"<ref>{label}</ref>{_box_tokens(cell.bbox, page)}")
+    else:
+        raise ValueError(f"unknown jsonl mode {mode!r}")
+    answer = "".join(parts) if parts else "<box>none</box>"
+    return {
+        "image": page.image,
+        "conversations": [
+            {"from": "human", "value": "<image-1>\n" + prompt},
+            {"from": "gpt", "value": answer},
+        ],
+    }
+
+
+def build_samples(page: Page, mode: str = "tatr") -> list[dict]:
+    """One LocateAnything detection sample per page (grounding is image-level)."""
+    return [to_locateanything(page, mode)]
 
 
 # --------------------------------------------------------------------------- #
@@ -388,15 +459,13 @@ def page_to_coco_tatr_entries(page: Page, image_id: int, ann_id_start: int):
             continue
         tx1, ty1, tx2, ty2 = _table_bbox(table)
         for r in range(table.n_rows):
-            cov = [c for c in table.cells if c.row <= r < c.row + c.rowspan]
-            if cov:
-                y1 = min(c.bbox[1] for c in cov); y2 = max(c.bbox[3] for c in cov)
-                anns.append(_coco_box(aid, image_id, 1, tx1, y1, tx2, y2)); aid += 1
+            band = _row_band(table, r)
+            if band:
+                anns.append(_coco_box(aid, image_id, 1, tx1, band[0], tx2, band[1])); aid += 1
         for cc in range(table.n_cols):
-            cov = [c for c in table.cells if c.col <= cc < c.col + c.colspan]
-            if cov:
-                x1 = min(c.bbox[0] for c in cov); x2 = max(c.bbox[2] for c in cov)
-                anns.append(_coco_box(aid, image_id, 2, x1, ty1, x2, ty2)); aid += 1
+            band = _col_band(table, cc)
+            if band:
+                anns.append(_coco_box(aid, image_id, 2, band[0], ty1, band[1], ty2)); aid += 1
         for c in table.cells:
             if c.rowspan > 1 or c.colspan > 1:
                 x1, y1, x2, y2 = c.bbox
@@ -510,14 +579,38 @@ def _self_test():
     # transkribus: 2 rows + 3 cols + 1 span(c00) ; prima: 2 rows + 2 cols + 1 span(r0)
     assert (n_rows, n_cols, n_span) == (4, 5, 2), (n_rows, n_cols, n_span)
     print("TATR :", n_rows, "row +", n_cols, "col +", n_span, "spanning-cell boxes (classes", sorted(cats), ")")
+
+    # LocateAnything ShareGPT format (Exp A) -- must match Eagle/Embodied exactly
+    import re as _re
+    la = to_locateanything(p1, "tatr")
+    hv = la["conversations"][0]["value"]
+    gv = la["conversations"][1]["value"]
+    assert "</c>".join(TATR_CATEGORIES) in hv, hv               # categories joined by </c>
+    assert "[" not in gv and "(" not in gv, gv                 # token coords, not [..]/(..)
+    assert _re.fullmatch(r"(<ref>[^<]+</ref><box>(<\d+>){4}</box>)+", gv), gv
+    # p1 is 1000x500 -> row band 0 = (0,0,1000,100)px -> y2 = 100/500*1000 = 200
+    assert "<ref>table row</ref><box><0><0><1000><200></box>" in gv, gv
+    assert "<ref>table row</ref><box><0><200><1000><400></box>" in gv, gv          # row band 1
+    assert "<ref>table spanning cell</ref><box><0><0><500><200></box>" in gv, gv   # c00 colspan=2
+    # cells mode carries logical (row,col[,span]) in the ref label
+    gvc = to_locateanything(p1, "cells")["conversations"][1]["value"]
+    assert "<ref>row 0 col 0 rowspan 1 colspan 2</ref><box><0><0><500><200></box>" in gvc, gvc
+    # negative page -> explicit none token
+    empty = to_locateanything(Page(image="x", width=10, height=10), "tatr")
+    assert empty["conversations"][1]["value"] == "<box>none</box>"
+    print("LOCANY: prompt + boxes OK (", gv[:64], "...)")
     print("\nAll self-tests passed.")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("page_xml", nargs="*", help="One or more Transkribus/PRImA PAGE XML files")
-    ap.add_argument("--jsonl", help="Append ShareGPT samples (Exp A: LocateAnything) to this JSONL file")
-    ap.add_argument("--coco", help="Write COCO detection json (Exp B: RF-DETR/TIPS) over all inputs")
+    ap.add_argument("--jsonl", help="Write ShareGPT JSONL (Exp A: LocateAnything) over all inputs")
+    ap.add_argument("--jsonl-mode", choices=["tatr", "cells"], default="tatr",
+                    help="tatr = row/column/spanning-cell categories (intersect downstream); "
+                         "cells = one box/cell, logical (row,col,span) carried in the <ref> label")
+    ap.add_argument("--recipe", help="Also write a LocateAnything recipe JSON (--meta_path) for --jsonl")
+    ap.add_argument("--coco", help="Write COCO detection json (Exp B: TipsDETR/RF-DETR) over all inputs")
     ap.add_argument("--coco-mode", choices=["cells", "tatr"], default="cells",
                     help="cells = one box/cell + logic_axis (needs logical head); "
                          "tatr = row/column/spanning-cell boxes (stock RF-DETR, zero fork)")
@@ -544,16 +637,26 @@ def main():
               f"{len(coco['annotations'])} anns", file=sys.stderr)
         return
 
-    for page in pages:
-        samples = build_samples(page)
-        print(f"# {page.image}: {len(page.tables)} table(s), {len(samples)} sample(s)", file=sys.stderr)
+    samples = [s for page in pages for s in build_samples(page, args.jsonl_mode)]
+    if args.jsonl:
+        with open(args.jsonl, "w", encoding="utf-8") as f:
+            for s in samples:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+        print(f"# wrote {args.jsonl} ({args.jsonl_mode}): {len(samples)} samples "
+              f"from {len(pages)} page(s)", file=sys.stderr)
+        if args.recipe:
+            recipe = {"handwritten_tables": {
+                "annotation": args.jsonl,
+                "root": args.image_root or "",
+                "repeat_time": 1.0,
+                "data_augment": True,
+            }}
+            with open(args.recipe, "w", encoding="utf-8") as f:
+                json.dump(recipe, f, ensure_ascii=False, indent=2)
+            print(f"# wrote {args.recipe} (LocateAnything --meta_path recipe)", file=sys.stderr)
+    else:
         for s in samples:
-            line = json.dumps(s, ensure_ascii=False)
-            if args.jsonl:
-                with open(args.jsonl, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-            else:
-                print(line)
+            print(json.dumps(s, ensure_ascii=False))
 
 
 if __name__ == "__main__":
