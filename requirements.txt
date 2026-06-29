@@ -1,0 +1,16 @@
+# Core converter (data/page_to_targets.py): stdlib only — nothing required.
+
+# --- Eval (eval/eval_teds.py) ---
+apted            # canonical TEDS backend (tree-edit distance)
+
+# --- Build-our-own track / TIPS encoder (models/tips_encoder.py) — GPU box ---
+torch
+torchvision
+transformers>=4.44     # TIPS v2 HF DPT path (trust_remote_code)
+numpy                  # TIPS npz checkpoint path
+# tips                 # pip install from github.com/google-deepmind/tips for the npz path
+# Detection decoder: mmdetection (Deformable-DETR / Mask2Former) or detrex.
+
+# --- Fine-tune LocateAnything track (Exp A) — H100/Blackwell box ---
+# Install from NVlabs/Eagle (Embodied): pip install -e .  (eagle_vl + deps)
+# Long-context PBD training needs Magi Attention (Hopper/Blackwell); SDPA ~4k on A100.
