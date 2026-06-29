@@ -39,7 +39,10 @@ page image (square, e.g. 1568 = 14·112)
 
 The frozen TIPS ViT contributes the pretrained visual representation; **only the
 projector + transformer + heads train** (~40M params, printed at startup). Swapping
-TIPS → DINOv3 is a one-line backbone change (both patch-14 register ViTs).
+TIPS → DINOv3 is a small backbone change (DINOv3 is patch-**16**, not 14, and its
+weights are under Meta's restrictive license vs TIPS's CC-BY). The backbone can be
+**frozen or fine-tuned**: `--no-freeze-backbone` trains the ViT with a separate
+`--lr-encoder` and layer-wise LR decay (RF-DETR's recipe).
 
 ## From boxes to logical structure (TATR)
 

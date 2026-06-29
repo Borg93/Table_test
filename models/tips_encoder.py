@@ -15,6 +15,8 @@ installed (see requirements.txt). Not executable in CI (no GPU here).
 """
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,6 +85,7 @@ class TipsEncoder(nn.Module):
             self.n_layers = len(self.vision.blocks)
             self._mode = "hf"
 
+        self.frozen = freeze
         if freeze:
             self.vision.eval()
             for p in self.vision.parameters():
@@ -93,13 +96,18 @@ class TipsEncoder(nn.Module):
     def grid(self) -> int:
         return self.image_size // PATCH_SIZE
 
-    @torch.no_grad()
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-        """x: (B,3,H,W) -> list of (B, C, gh, gw) token grids, one per tap layer."""
+        """x: (B,3,H,W) -> list of (B, C, gh, gw) token grids, one per tap layer.
+
+        Gradients flow only when the encoder is unfrozen (fine-tuning the backbone);
+        when frozen we run under no_grad to save memory.
+        """
+        ctx = torch.no_grad() if self.frozen else contextlib.nullcontext()
         layers = [l if l >= 0 else self.n_layers + l for l in self.taps]
-        feats = self.vision.get_intermediate_layers(
-            x, n=sorted(set(layers)), reshape=True, norm=True
-        )
+        with ctx:
+            feats = self.vision.get_intermediate_layers(
+                x, n=sorted(set(layers)), reshape=True, norm=True
+            )
         return list(feats)
 
 

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Train TipsDETR on the COCO json from data/page_to_targets.py (--coco-mode tatr).
 
-Single-node; the frozen TIPS backbone means only the projector + transformer +
-heads update. Offline/batch target, so AMP + large effective batch over the 8×H100
-box (wrap with `torchrun --nproc_per_node=8` and the DDP block below). Run the
-shape/loss smoke test first:  python -m tips_detr.smoke
+Single-node. By default the TIPS backbone is frozen (only projector + transformer +
+heads update); pass --no-freeze-backbone to fine-tune the ViT too, with a separate
+--lr-encoder and ViT layer-wise LR decay (RF-DETR's recipe) — recommended for the
+large PubTables pretrain, keep frozen for tiny fine-tunes. Offline/batch target, so
+AMP + large effective batch over the 8×H100 box (wrap with `torchrun
+--nproc_per_node=8`). Run the shape/loss smoke test first:  python -m tips_detr.smoke
 
 Example:
     python -m tips_detr.train \
@@ -16,8 +18,8 @@ Example:
 from __future__ import annotations
 
 import argparse
-import math
 import os
+import re
 from pathlib import Path
 
 import torch
@@ -33,11 +35,34 @@ def move(targets, device):
     return [{k: v.to(device) for k, v in t.items()} for t in targets]
 
 
+def _vit_layer_lr(name, base_lr, decay, num_layers):
+    """RF-DETR-style ViT layer-wise LR decay: earlier blocks move less."""
+    m = re.search(r"blocks\.(\d+)\.", name)
+    if m is None:
+        return base_lr                      # patch-embed / norm: full encoder lr
+    return base_lr * (decay ** (num_layers - 1 - int(m.group(1))))
+
+
+def build_param_groups(model, args, num_bb_layers):
+    """Separate LR for the (optionally unfrozen) backbone, with layer-wise decay."""
+    groups, others = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if n.startswith("backbone."):
+            groups.append({"params": [p],
+                           "lr": _vit_layer_lr(n, args.lr_encoder, args.lr_vit_layer_decay, num_bb_layers)})
+        else:
+            others.append(p)
+    groups.append({"params": others, "lr": args.lr})
+    return groups
+
+
 def build(args, num_classes):
     cfg = TipsDETRConfig(
         num_classes=num_classes, backbone=args.backbone, tips_variant=args.tips_variant,
         image_size=args.image_size, num_queries=args.num_queries,
-        npz_vision_ckpt=args.npz_vision_ckpt)
+        npz_vision_ckpt=args.npz_vision_ckpt, freeze_backbone=args.freeze_backbone)
     model = TipsDETR(cfg)
     matcher = HungarianMatcher(cost_class=2.0, cost_bbox=5.0, cost_giou=2.0)
     weight_dict = {"loss_ce": 2.0, "loss_bbox": 5.0, "loss_giou": 2.0}
@@ -58,6 +83,13 @@ def main():
                          "for --backbone tips")
     ap.add_argument("--image-size", type=int, default=1568)
     ap.add_argument("--num-queries", type=int, default=900)
+    ap.add_argument("--freeze-backbone", action=argparse.BooleanOptionalAction, default=True,
+                    help="--no-freeze-backbone to fine-tune the ViT (recommended for "
+                         "the large PubTables pretrain; keep frozen for tiny fine-tunes)")
+    ap.add_argument("--lr-encoder", type=float, default=1.5e-4,
+                    help="LR for the backbone when unfrozen (RF-DETR uses 1.5e-4)")
+    ap.add_argument("--lr-vit-layer-decay", type=float, default=0.8,
+                    help="Layer-wise LR decay for the ViT blocks (RF-DETR uses 0.8)")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--lr", type=float, default=2e-4)
@@ -93,11 +125,16 @@ def main():
     train_model = (torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
                    if ddp else model)
 
-    trainable = [p for p in model.parameters() if p.requires_grad]
+    num_bb_layers = getattr(getattr(model.backbone, "encoder", None), "n_layers", 12)
+    param_groups = build_param_groups(model, args, num_bb_layers)
+    trainable = [p for g in param_groups for p in g["params"]]
     n_train = sum(p.numel() for p in trainable)
+    n_bb = sum(p.numel() for n, p in model.named_parameters()
+               if p.requires_grad and n.startswith("backbone."))
     if local_rank == 0:
-        print(f"trainable params: {n_train/1e6:.1f}M  (backbone frozen)")
-    opt = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
+        state = "frozen" if args.freeze_backbone else f"fine-tuned, lr_encoder={args.lr_encoder}"
+        print(f"trainable params: {n_train/1e6:.1f}M  (backbone {n_bb/1e6:.1f}M {state})")
+    opt = torch.optim.AdamW(param_groups, lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * len(train_dl))
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 

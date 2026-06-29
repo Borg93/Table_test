@@ -51,10 +51,13 @@ class StubBackbone(nn.Module):
     Lets the transformer/heads/criterion be smoke-tested with no GPU or weights.
     """
 
-    def __init__(self, embed_dim=256, n_taps=4, patch=14):
+    def __init__(self, embed_dim=256, n_taps=4, patch=14, freeze=False):
         super().__init__()
         self.stem = nn.Conv2d(3, embed_dim, patch, stride=patch)
         self.embed_dim, self.n_taps = embed_dim, n_taps
+        if freeze:
+            for p in self.parameters():
+                p.requires_grad_(False)
 
     def forward(self, x):
         f = self.stem(x)
@@ -62,14 +65,14 @@ class StubBackbone(nn.Module):
 
 
 class TipsBackbone(nn.Module):
-    """Frozen TIPS v2 encoder, exposing `n_taps` tapped /14 grids."""
+    """TIPS v2 encoder, exposing `n_taps` tapped /14 grids. Frozen or fine-tunable."""
 
     def __init__(self, variant="L", image_size=1568, taps=(5, 11, 17, 23),
-                 npz_vision_ckpt=None):
+                 npz_vision_ckpt=None, freeze=True):
         super().__init__()
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
         from tips_encoder import TipsEncoder  # noqa: E402
-        self.encoder = TipsEncoder(variant=variant, image_size=image_size, freeze=True,
+        self.encoder = TipsEncoder(variant=variant, image_size=image_size, freeze=freeze,
                                    npz_vision_ckpt=npz_vision_ckpt, taps=tuple(taps))
         embed_dim = self.encoder.embed_dim
         assert embed_dim is not None, "TIPS encoder exposed no embed_dim"
@@ -101,6 +104,7 @@ class TipsDETRConfig:
     image_size: int = 1568
     tips_taps: tuple = (5, 11, 17, 23)
     npz_vision_ckpt: str | None = None
+    freeze_backbone: bool = True         # set False to fine-tune the ViT (RF-DETR-style)
     aux_loss: bool = True
 
 
@@ -110,10 +114,12 @@ class TipsDETR(nn.Module):
         self.cfg = cfg
         self.backbone: StubBackbone | TipsBackbone
         if cfg.backbone == "stub":
-            self.backbone = StubBackbone(cfg.hidden_dim, len(cfg.tips_taps))
+            self.backbone = StubBackbone(cfg.hidden_dim, len(cfg.tips_taps),
+                                         freeze=cfg.freeze_backbone)
         else:
             self.backbone = TipsBackbone(cfg.tips_variant, cfg.image_size,
-                                         cfg.tips_taps, cfg.npz_vision_ckpt)
+                                         cfg.tips_taps, cfg.npz_vision_ckpt,
+                                         freeze=cfg.freeze_backbone)
         in_ch = [self.backbone.embed_dim] * self.backbone.n_taps
         self.projector = MultiScaleProjector(in_ch, cfg.hidden_dim, cfg.scales)
         self.transformer = DeformableTransformer(

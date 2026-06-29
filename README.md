@@ -53,7 +53,12 @@ torchrun --nproc_per_node=8 -m tips_detr.train \
 Train on `--coco-mode tatr` (classes `table row / table column / table spanning cell`);
 at inference **intersect** row-bands × column-bands → logical cell grid, spanning-cell
 boxes fix merges (works with faint gridlines + empty cells — bands are geometric).
-Swapping TIPS → DINOv3 is a one-line backbone change. If spans can't be resolved by
+Swapping TIPS → DINOv3 is a small backbone change (DINOv3 is **patch-16**, so set
+`patch_size=16` and the resolution accordingly; its weights are under Meta's
+restrictive DINOv3 License, vs TIPS v2's permissive CC-BY). The backbone is also
+**fine-tunable**, not just frozen: `--no-freeze-backbone` trains the ViT with a
+separate `--lr-encoder` + layer-wise decay (RF-DETR's recipe) — recommended for the
+PubTables pretrain. If spans can't be resolved by
 intersection, add a per-query `logic_embed` head (`--coco-mode cells` already emits
 `logic_axis`). Resolution must be a multiple of 14; **tile** ~4000px scans.
 
