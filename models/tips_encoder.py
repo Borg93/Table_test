@@ -25,14 +25,24 @@ PATCH_SIZE = 14
 IMAGE_MEAN = (0.0, 0.0, 0.0)
 IMAGE_STD = (1.0, 1.0, 1.0)
 
+# CANONICAL path: TIPS v2 vision weights are npz files from the official GCS bucket,
+# loaded via the tips repo's pytorch/image_encoder.py constructors + get_intermediate_layers.
+# Download via the repo's pytorch/checkpoints/download_checkpoints.sh, which pulls
+#   https://storage.googleapis.com/tips_data/v2_0/checkpoints/pytorch/<ckpt>_vision.npz
+# then pass that .npz path as npz_vision_ckpt=...  (constructor names verified against
+# google-deepmind/tips image_encoder.py: vit_base/large/so400m/giant2, all patch-14).
+NPZ_CONSTRUCTOR = {"B": "vit_base", "L": "vit_large", "So": "vit_so400m", "g": "vit_giant2"}
+NPZ_NUM_LAYERS = {"B": 12, "L": 24, "So": 27, "g": 40}
+
+# OPTIONAL HF DPT path (Feature-Explorer style). These ids are best-effort — confirm
+# against the google/tipsv2 HF collection (https://huggingface.co/collections/google/tipsv2)
+# before relying on them. Prefer the npz path above, which matches the official loader.
 HF_VARIANTS = {
     "B": "google/tipsv2-b14-dpt",
     "L": "google/tipsv2-l14-dpt",
-    "So400m": "google/tipsv2-so400m14-dpt",
+    "So": "google/tipsv2-so400m14-dpt",
     "g": "google/tipsv2-g14-dpt",
 }
-NPZ_CONSTRUCTOR = {"B": "vit_base", "L": "vit_large", "So": "vit_so", "g": "vit_giant2"}
-NPZ_NUM_LAYERS = {"B": 12, "L": 24, "So": 27, "g": 40}
 
 
 def preprocess(img, size: int) -> torch.Tensor:

@@ -36,7 +36,8 @@ def move(targets, device):
 def build(args, num_classes):
     cfg = TipsDETRConfig(
         num_classes=num_classes, backbone=args.backbone, tips_variant=args.tips_variant,
-        image_size=args.image_size, num_queries=args.num_queries)
+        image_size=args.image_size, num_queries=args.num_queries,
+        npz_vision_ckpt=args.npz_vision_ckpt)
     model = TipsDETR(cfg)
     matcher = HungarianMatcher(cost_class=2.0, cost_bbox=5.0, cost_giou=2.0)
     weight_dict = {"loss_ce": 2.0, "loss_bbox": 5.0, "loss_giou": 2.0}
@@ -52,6 +53,9 @@ def main():
     ap.add_argument("--val-images")
     ap.add_argument("--backbone", default="tips", choices=["tips", "stub"])
     ap.add_argument("--tips-variant", default="L")
+    ap.add_argument("--npz-vision-ckpt", default=None,
+                    help="Path to TIPS v2 *_vision.npz (from download_checkpoints.sh) "
+                         "for --backbone tips")
     ap.add_argument("--image-size", type=int, default=1568)
     ap.add_argument("--num-queries", type=int, default=900)
     ap.add_argument("--epochs", type=int, default=100)
