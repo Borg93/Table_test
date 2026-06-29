@@ -321,6 +321,46 @@ def build_samples(page: Page) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# COCO detection targets (Exp B: RF-DETR / TableCenterNet-style training)
+# --------------------------------------------------------------------------- #
+def page_to_coco_entries(page: Page, image_id: int, ann_id_start: int, category_id: int = 1):
+    """(image_dict, [annotation_dicts], next_ann_id) in COCO detection format.
+
+    Each cell -> one annotation: axis-aligned bbox [x,y,w,h], a 4-point
+    segmentation quad, and a TableCenterNet-style logic_axis
+    [[start_col, end_col, start_row, end_row]] (0-indexed). Empty cells included.
+    Feeds RF-DETR's COCO dataloader directly; regress logic_axis with an added
+    logical-coordinate head (logic_embed = MLP(d, d, 4, 3)) alongside bbox_embed.
+    """
+    image = {"id": image_id, "file_name": page.image,
+             "width": page.width, "height": page.height}
+    anns, aid = [], ann_id_start
+    for table in page.tables:
+        for cell in table.cells:
+            x1, y1, x2, y2 = cell.bbox
+            w, h = x2 - x1, y2 - y1
+            anns.append({
+                "id": aid, "image_id": image_id, "category_id": category_id,
+                "bbox": [x1, y1, w, h], "area": w * h, "iscrowd": 0,
+                "segmentation": [[x1, y1, x2, y1, x2, y2, x1, y2]],
+                "logic_axis": [[cell.col, cell.col + cell.colspan - 1,
+                                cell.row, cell.row + cell.rowspan - 1]],
+            })
+            aid += 1
+    return image, anns, aid
+
+
+def build_coco(pages: list[Page], category_name: str = "cell") -> dict:
+    images, annotations, aid = [], [], 1
+    for i, page in enumerate(pages, start=1):
+        img, anns, aid = page_to_coco_entries(page, i, aid)
+        images.append(img)
+        annotations.extend(anns)
+    return {"images": images, "annotations": annotations,
+            "categories": [{"id": 1, "name": category_name}], "type": "instances"}
+
+
+# --------------------------------------------------------------------------- #
 # Self-test (synthetic PAGE XML, both flavors) -- runnable with no external data
 # --------------------------------------------------------------------------- #
 _TRANSKRIBUS = """<?xml version="1.0"?>
@@ -399,14 +439,22 @@ def _self_test():
     # empty-cell-without-text still produces a box and a grid slot
     det2, s2 = to_detection(t2, p2)
     assert any(c["text"] == "" for c in s2)
+    # COCO emitter (RF-DETR / TableCenterNet target)
+    coco = build_coco([p1, p2])
+    assert len(coco["images"]) == 2 and len(coco["annotations"]) == 8, coco
+    a0 = coco["annotations"][0]
+    assert a0["bbox"] == [0, 0, 500, 100] and a0["logic_axis"] == [[0, 1, 0, 0]], a0
+    assert len(a0["segmentation"][0]) == 8  # 4-point quad
+    print("COCO :", len(coco["images"]), "images,", len(coco["annotations"]), "cell anns; ann[0].logic_axis", a0["logic_axis"])
     print("\nAll self-tests passed.")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("page_xml", nargs="?", help="Path to a Transkribus/PRImA PAGE XML file")
-    ap.add_argument("--jsonl", help="Append ShareGPT samples to this JSONL file")
-    ap.add_argument("--image-root", default="", help="Prefix prepended to image paths in samples")
+    ap.add_argument("page_xml", nargs="*", help="One or more Transkribus/PRImA PAGE XML files")
+    ap.add_argument("--jsonl", help="Append ShareGPT samples (Exp A: LocateAnything) to this JSONL file")
+    ap.add_argument("--coco", help="Write COCO detection json (Exp B: RF-DETR/TIPS) over all inputs")
+    ap.add_argument("--image-root", default="", help="Prefix prepended to image paths")
     ap.add_argument("--self-test", action="store_true", help="Run on synthetic PAGE XML and exit")
     args = ap.parse_args()
 
@@ -414,18 +462,30 @@ def main():
         _self_test()
         return
 
-    page = parse_page(args.page_xml)
-    if args.image_root and page.image:
-        page.image = f"{args.image_root.rstrip('/')}/{page.image}"
-    samples = build_samples(page)
-    print(f"# {args.page_xml}: {len(page.tables)} table(s), {len(samples)} sample(s)", file=sys.stderr)
-    for s in samples:
-        line = json.dumps(s, ensure_ascii=False)
-        if args.jsonl:
-            with open(args.jsonl, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        else:
-            print(line)
+    pages = []
+    for path in args.page_xml:
+        page = parse_page(path)
+        if args.image_root and page.image:
+            page.image = f"{args.image_root.rstrip('/')}/{page.image}"
+        pages.append(page)
+
+    if args.coco:
+        coco = build_coco(pages)
+        with open(args.coco, "w", encoding="utf-8") as f:
+            json.dump(coco, f, ensure_ascii=False)
+        print(f"# wrote {args.coco}: {len(coco['images'])} images, {len(coco['annotations'])} cell anns", file=sys.stderr)
+        return
+
+    for page in pages:
+        samples = build_samples(page)
+        print(f"# {page.image}: {len(page.tables)} table(s), {len(samples)} sample(s)", file=sys.stderr)
+        for s in samples:
+            line = json.dumps(s, ensure_ascii=False)
+            if args.jsonl:
+                with open(args.jsonl, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            else:
+                print(line)
 
 
 if __name__ == "__main__":

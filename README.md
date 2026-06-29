@@ -27,31 +27,44 @@ dense pages with 100s of cells). Already does dense detection + document layout/
   vision+LLM, Magi Attention on H100/Blackwell). Note: LocateAnything **weights are
   under NVIDIA license**.
 
-### Exp B — build our own (TIPS v2 encoder + detection head)
-Frozen **TIPS v2** encoder (`models/tips_encoder.py`, wired to the exact API from
-the TIPS Feature Explorer + foreground-seg notebook) → ViT-Adapter / simple FPN →
-**Deformable-DETR / Mask2Former** decoder with a per-cell **logical-coordinate head**
-(`start_col,end_col,start_row,end_row`). DINOv3 is a drop-in alternative encoder.
-- **Why:** no alignment cost (a detection head needs none), pixel-accurate quads,
-  trains on a single node; also serves as **auto-labeler / distillation teacher** for A.
-- **Encoder choice (TIPS vs DINOv3 vs MoonViT):** settle empirically with the cheap
-  linear probe (the foreground-seg recipe) before committing.
-- **Build-your-own VLM caveat:** swapping the encoder *inside a VLM* means redoing
-  vision-language alignment pretraining — expensive. Only go there if a probe shows a
-  clear win and fine-tuning A plateaus.
+### Exp B — build our own: RF-DETR with a TIPS v2 backbone
+Base it on **RF-DETR** (Roboflow, **Apache 2.0**) = LW-DETR + Deformable-attention on
+a pretrained **DINOv2-with-registers** ViT, patch-14, COCO-trained, easy to fine-tune.
+It already solves the two hard parts of "ViT + DETR":
+- `MultiScaleProjector` (ViT layers → P3–P6 pyramid) — the real version of our FPN stub.
+- `dinov2_with_windowed_attn` — runs the ViT at high res efficiently (most blocks
+  windowed, few global) — needed for our ~4000px dense pages.
+
+**Adaptation (small, well-scoped):**
+1. Write a `TipsV2` backbone mirroring RF-DETR's `DinoV2` interface (both are patch-14
+   register ViTs, so the projector/transformer/heads are unchanged). DINOv3 is a
+   drop-in alternative. Encoder uses `models/tips_encoder.py` (the TIPS API you gave).
+2. Add `logic_embed = MLP(d, d, 4, 3)` to `DetectionHead` → regress
+   `(start_col,end_col,start_row,end_row)`; add the L1 term in `criterion.py`.
+3. Targets: `python data/page_to_targets.py *.xml --coco train.json` — COCO boxes +
+   `logic_axis` per cell. Warm-start from RF-DETR COCO weights; tile/raise resolution
+   for thin columns.
+
+- **Why:** no vision-language alignment cost (a detection head needs none),
+  pixel-accurate boxes, trains on a single node; also an **auto-labeler / teacher** for A.
+- **Encoder choice (TIPS vs DINOv3 vs MoonViT):** settle with the cheap linear probe
+  (foreground-seg recipe) before committing.
+- **Caveat:** swapping the encoder *inside a VLM* (vs. inside this detector) would mean
+  redoing alignment pretraining — expensive. Here, inside RF-DETR, the swap is free.
 
 ## Repo
 
 | Path | What | Status |
 |------|------|--------|
-| `data/page_to_targets.py` | PAGE XML → detection-box + OTSL + HTML targets (both Transkribus & PRImA flavors; empty cells kept) | **done, self-test passes** |
-| `models/tips_encoder.py` | Frozen TIPS v2 encoder (HF DPT + npz paths) → multi-layer features for a DETR/Mask2Former head | scaffold (needs GPU) |
+| `data/page_to_targets.py` | PAGE XML → ShareGPT (Exp A) **+ COCO `--coco` (Exp B)** + OTSL/HTML; both PAGE flavors; empty cells kept | **done, self-test passes** |
+| `models/tips_encoder.py` | Frozen TIPS v2 encoder (HF DPT + npz paths); drop into RF-DETR's backbone slot (use its `MultiScaleProjector`) | scaffold (needs GPU) |
 | `eval/eval_teds.py` | TEDS structure metric (logical correctness, not box IoU) | scaffold (`pip install apted`) |
 
 ```bash
-python data/page_to_targets.py --self-test          # verify (no deps)
-python data/page_to_targets.py PAGE.xml --jsonl out.jsonl
-python eval/eval_teds.py --self-test                # needs apted
+python data/page_to_targets.py --self-test                 # verify (no deps)
+python data/page_to_targets.py *.xml --jsonl out.jsonl     # Exp A: LocateAnything ShareGPT
+python data/page_to_targets.py *.xml --coco train.json     # Exp B: RF-DETR/TIPS COCO
+python eval/eval_teds.py --self-test                       # needs apted
 ```
 
 ## Status / next
