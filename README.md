@@ -27,37 +27,36 @@ dense pages with 100s of cells). Already does dense detection + document layout/
   vision+LLM, Magi Attention on H100/Blackwell). Note: LocateAnything **weights are
   under NVIDIA license**.
 
-### Exp B — build our own: RF-DETR with a TIPS v2 backbone
+### Exp B — build our own: RF-DETR (+ optional TIPS v2 backbone)
 Base it on **RF-DETR** (Roboflow, **Apache 2.0**) = LW-DETR + Deformable-attention on
 a pretrained **DINOv2-with-registers** ViT, patch-14, COCO-trained, easy to fine-tune.
-It already solves the two hard parts of "ViT + DETR":
-- `MultiScaleProjector` (ViT layers → P3–P6 pyramid) — the real version of our FPN stub.
-- `dinov2_with_windowed_attn` — runs the ViT at high res efficiently (most blocks
-  windowed, few global) — needed for our ~4000px dense pages.
+It already solves the two hard parts of "ViT + DETR" (`MultiScaleProjector` ViT→P3–P6;
+`dinov2_with_windowed_attn` for high-res). Full recipe in
+[`exp_b_rfdetr/INTEGRATION.md`](exp_b_rfdetr/INTEGRATION.md). **Staged — fork only when justified:**
 
-**Adaptation (small, well-scoped):**
-1. Write a `TipsV2` backbone mirroring RF-DETR's `DinoV2` interface (both are patch-14
-   register ViTs, so the projector/transformer/heads are unchanged). DINOv3 is a
-   drop-in alternative. Encoder uses `models/tips_encoder.py` (the TIPS API you gave).
-2. Add `logic_embed = MLP(d, d, 4, 3)` to `DetectionHead` → regress
-   `(start_col,end_col,start_row,end_row)`; add the L1 term in `criterion.py`.
-3. Targets: `python data/page_to_targets.py *.xml --coco train.json` — COCO boxes +
-   `logic_axis` per cell. Warm-start from RF-DETR COCO weights; tile/raise resolution
-   for thin columns.
+- **B0 (zero fork):** stock RF-DETR on our COCO. `--coco-mode tatr` emits
+  `row / column / spanning-cell` boxes → intersect rows×cols for the logical grid (no
+  custom head, no dataloader edit). `--coco-mode cells` gives one box/cell for the
+  reconstruction route.
+- **B1 (small fork):** swap DINOv2→TIPS v2 — both patch-14 register ViTs, so projector/
+  transformer/heads are unchanged; only a `TipsV2Backbone` (`exp_b_rfdetr/tips_backbone.py`,
+  wrapping `models/tips_encoder.py`) + an encoder-enum branch. DINOv3 is a drop-in alt.
+- **B2 (additive):** per-cell `logic_embed` head + `ConvertCoco` `logic_axis` parse +
+  L1 loss — only if row×col intersection can't resolve spans.
 
-- **Why:** no vision-language alignment cost (a detection head needs none),
-  pixel-accurate boxes, trains on a single node; also an **auto-labeler / teacher** for A.
-- **Encoder choice (TIPS vs DINOv3 vs MoonViT):** settle with the cheap linear probe
-  (foreground-seg recipe) before committing.
-- **Caveat:** swapping the encoder *inside a VLM* (vs. inside this detector) would mean
-  redoing alignment pretraining — expensive. Here, inside RF-DETR, the swap is free.
+**Why:** no vision-language alignment cost (a detection head needs none), pixel-accurate
+boxes, single-node; also an **auto-labeler / teacher** for A. Settle the encoder choice
+(TIPS vs DINOv3 vs MoonViT) with the cheap linear probe first. Note the resolution
+constraint: square res must be divisible by `patch_size * num_windows` (tile the ~4000px pages).
 
 ## Repo
 
 | Path | What | Status |
 |------|------|--------|
-| `data/page_to_targets.py` | PAGE XML → ShareGPT (Exp A) **+ COCO `--coco` (Exp B)** + OTSL/HTML; both PAGE flavors; empty cells kept | **done, self-test passes** |
-| `models/tips_encoder.py` | Frozen TIPS v2 encoder (HF DPT + npz paths); drop into RF-DETR's backbone slot (use its `MultiScaleProjector`) | scaffold (needs GPU) |
+| `data/page_to_targets.py` | PAGE XML → ShareGPT (A) + COCO `--coco` cells/`tatr` (B) + OTSL/HTML; both PAGE flavors; empty cells kept | **done, self-test passes** |
+| `models/tips_encoder.py` | Frozen TIPS v2 encoder (HF DPT + npz paths) | scaffold (needs GPU) |
+| `exp_b_rfdetr/INTEGRATION.md` | Staged RF-DETR recipe (B0 stock → B1 TIPS swap → B2 logic head), real symbols | guide |
+| `exp_b_rfdetr/tips_backbone.py` | `TipsV2Backbone` matching RF-DETR's DinoV2 contract | scaffold (needs GPU) |
 | `eval/eval_teds.py` | TEDS structure metric (logical correctness, not box IoU) | scaffold (`pip install apted`) |
 
 ```bash
