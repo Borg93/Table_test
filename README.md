@@ -61,6 +61,14 @@ intersection, add a per-query `logic_embed` head (`--coco-mode cells` already em
 `--coco-mode tatr` json trains stock RF-DETR unchanged — staged notes (B0 stock → B1
 TIPS swap → B2 logic head) in [`exp_b_rfdetr/INTEGRATION.md`](exp_b_rfdetr/INTEGRATION.md).
 
+**Pretrain on PubTables-v2, then fine-tune on PAGE.** PubTables-v2 (kensho, CDLA-permissive,
+135k cropped tables) is the canonical TSR corpus in **PASCAL VOC** format — exactly TipsDETR's
+task. `data/pubtables_voc.py` converts it to our COCO (6 classes: `table`, `table column`,
+`table row`, `table column header`, `table projected row header`, `table spanning cell`).
+So you can train + validate the model on a large labeled dataset **now**, then domain-adapt to
+the handwritten registers with the (smaller) Transkribus PAGE data. Score with TEDS
+(`eval/eval_teds.py`) or GriTS (`pip install grits-metric`).
+
 **Why Exp B at all:** no vision-language alignment cost, pixel-accurate boxes,
 single-node, permissive license; also an **auto-labeler / teacher** for A. Settle the
 encoder choice (TIPS vs DINOv3) with the cheap linear probe first.
@@ -70,6 +78,7 @@ encoder choice (TIPS vs DINOv3) with the cheap linear probe first.
 | Path | What | Status |
 |------|------|--------|
 | `data/page_to_targets.py` | PAGE XML → LocateAnything ShareGPT (A, `--jsonl`) + COCO (B, `--coco` cells/`tatr`) + OTSL/HTML; both PAGE flavors; empty cells kept | **done, self-test passes** |
+| `data/pubtables_voc.py` | PubTables-v2 / TATR **PASCAL VOC** → our COCO (6 structure classes). Pretrain TipsDETR on PubTables-v2, then fine-tune on PAGE | **done, self-test + train-step verified** |
 | `exp_a_locateanything/` | **LocateAnything fine-tune** (recipe.json + `finetune_lora.sh`/`finetune_sft.sh` + FINETUNE.md), format verified vs Eagle source | **done, data format verified** |
 | `tips_detr/` | **Our own TIPS v2 + deformable-DETR detector** (model, transformer, deformable attn, matcher, criterion, dataset, train, smoke) | **done, smoke + data path verified** |
 | `models/tips_encoder.py` | Frozen TIPS v2 encoder (HF DPT + npz paths), wrapped by `tips_detr` | scaffold (needs GPU) |
