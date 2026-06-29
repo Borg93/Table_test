@@ -4,7 +4,7 @@
 # sys.path-injected TIPS encoder) are treated as untyped so checks stay green
 # without a full GPU environment.
 project-includes = ["data", "eval", "tips_detr", "models", "exp_b_rfdetr"]
-search-path = [".", "models"]
+search-path = [".", "models", "eval"]
 
 # Optional third-party deps that are only present on the GPU/training box.
 replace-imports-with-any = [

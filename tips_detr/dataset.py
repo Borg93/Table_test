@@ -41,6 +41,9 @@ class CocoTableDataset(Dataset):
         self.cats = sorted(c["id"] for c in coco["categories"])
         self.cat2label = {cid: i for i, cid in enumerate(self.cats)}
         self.num_classes = len(self.cats)
+        id2name = {c["id"]: c["name"] for c in coco["categories"]}
+        # class name per 0-indexed label (the order the model's logits use)
+        self.class_names = [id2name[cid] for cid in self.cats]
         by_img = defaultdict(list)
         for a in coco["annotations"]:
             by_img[a["image_id"]].append(a)

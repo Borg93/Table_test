@@ -27,8 +27,21 @@ from torch.utils.data import DataLoader
 
 from .criterion import SetCriterion
 from .dataset import CocoTableDataset, collate_fn
+from .evaluate import evaluate_teds
 from .matcher import HungarianMatcher
 from .model import TipsDETR, TipsDETRConfig
+
+
+def load_init_weights(model, path):
+    """Load a pretrained checkpoint for fine-tuning; skip shape-mismatched keys
+    (e.g. the class head when the class count changes). Returns (kept, skipped)."""
+    sd = torch.load(path, map_location="cpu")
+    sd = sd.get("model", sd)
+    msd = model.state_dict()
+    keep = {k: v for k, v in sd.items() if k in msd and v.shape == msd[k].shape}
+    skipped = [k for k in sd if k not in keep]
+    model.load_state_dict(keep, strict=False)
+    return len(keep), skipped
 
 
 def move(targets, device):
@@ -98,6 +111,12 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", default="runs/tips_detr")
     ap.add_argument("--amp", action="store_true")
+    ap.add_argument("--init-weights", default=None,
+                    help="Pretrained checkpoint to fine-tune from (shape-mismatched "
+                         "heads, e.g. a different class count, are reset)")
+    ap.add_argument("--eval-every", type=int, default=1,
+                    help="Run validation TEDS every N epochs (needs --val-coco + apted)")
+    ap.add_argument("--score-thresh", type=float, default=0.5)
     args = ap.parse_args()
 
     # ---- optional DDP (torchrun sets these) ----
@@ -117,9 +136,22 @@ def main():
                           sampler=sampler, num_workers=args.workers, collate_fn=collate_fn,
                           pin_memory=True, drop_last=True)
 
+    val_dl = None
+    val_class_names = None
+    if args.val_coco and args.val_images:
+        val_ds = CocoTableDataset(args.val_coco, args.val_images, args.image_size)
+        val_class_names = val_ds.class_names
+        val_dl = DataLoader(val_ds, batch_size=args.batch_size, num_workers=args.workers,
+                            collate_fn=collate_fn)
+
     model, criterion = build(args, train_ds.num_classes)
     model.to(device)
     criterion.to(device)
+    if args.init_weights:
+        kept, skipped = load_init_weights(model, args.init_weights)
+        if local_rank == 0:
+            print(f"init from {args.init_weights}: loaded {kept} tensors, "
+                  f"reset {len(skipped)} (e.g. class head on class-count change)")
     # `model` always refers to the unwrapped TipsDETR (for .state_dict());
     # `train_model` is what we call forward on (DDP-wrapped under torchrun).
     train_model = (torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
@@ -140,6 +172,7 @@ def main():
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    best_teds = -1.0
 
     for epoch in range(args.epochs):
         train_model.train()
@@ -170,6 +203,17 @@ def main():
             torch.save(ckpt, out_dir / "last.pth")
             if (epoch + 1) % 10 == 0:
                 torch.save(ckpt, out_dir / f"epoch{epoch+1}.pth")
+            if val_dl is not None and (epoch + 1) % args.eval_every == 0:
+                try:
+                    teds, n = evaluate_teds(model, val_dl, val_class_names,
+                                        device, args.score_thresh)
+                    print(f"ep{epoch} val TEDS={teds:.4f} (structure-only, {n} imgs)")
+                    if teds > best_teds:
+                        best_teds = teds
+                        torch.save(ckpt, out_dir / "best.pth")
+                        print(f"ep{epoch} new best TEDS={teds:.4f} -> best.pth")
+                except SystemExit as e:        # apted missing -> eval_teds exits
+                    print(f"ep{epoch} TEDS skipped: {e}")
     if ddp:
         torch.distributed.destroy_process_group()
 
