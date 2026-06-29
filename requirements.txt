@@ -3,13 +3,15 @@
 # --- Eval (eval/eval_teds.py) ---
 apted            # canonical TEDS backend (tree-edit distance)
 
-# --- Build-our-own track / TIPS encoder (models/tips_encoder.py) — GPU box ---
-torch
-torchvision
+# --- Build-our-own track: TipsDETR (tips_detr/) + TIPS encoder — GPU box ---
+torch                  # tips_detr/* model, transformer, deformable attention (pure-torch)
+scipy                  # tips_detr/matcher.py (Hungarian: linear_sum_assignment)
+pillow                 # tips_detr/dataset.py image loading
+numpy                  # tips_detr/dataset.py + TIPS npz checkpoint path
 transformers>=4.44     # TIPS v2 HF DPT path (trust_remote_code)
-numpy                  # TIPS npz checkpoint path
+torchvision            # only models/tips_encoder.py preprocess (HF path); dataset is torchvision-free
 # tips                 # pip install from github.com/google-deepmind/tips for the npz path
-# Detection decoder: mmdetection (Deformable-DETR / Mask2Former) or detrex.
+# No mmdetection/detrex needed — the deformable DETR is implemented in tips_detr/.
 
 # --- Fine-tune LocateAnything track (Exp A) — H100/Blackwell box ---
 # Install from NVlabs/Eagle (Embodied): pip install -e .  (eagle_vl + deps)

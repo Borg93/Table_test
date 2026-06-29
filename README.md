@@ -13,8 +13,6 @@ written**. Text transcription is a later, optional stage.
 
 ## Two experiments (we run both)
 
-We are **not** using Surya. The two tracks are:
-
 ### Exp A — fine-tune LocateAnything (grounded VLM)
 NVlabs/Eagle `Embodied/` = **LocateAnything**: MoonViT encoder + Qwen2.5/Qwen3 LLM
 + MLP projector, with **Parallel Box Decoding** (atomic per-box decoding — key for
@@ -27,53 +25,67 @@ dense pages with 100s of cells). Already does dense detection + document layout/
   vision+LLM, Magi Attention on H100/Blackwell). Note: LocateAnything **weights are
   under NVIDIA license**.
 
-### Exp B — build our own: RF-DETR (+ optional TIPS v2 backbone)
-Base it on **RF-DETR** (Roboflow, **Apache 2.0**) = LW-DETR + Deformable-attention on
-a pretrained **DINOv2-with-registers** ViT, patch-14, COCO-trained, easy to fine-tune.
-It already solves the two hard parts of "ViT + DETR" (`MultiScaleProjector` ViT→P3–P6;
-`dinov2_with_windowed_attn` for high-res). Full recipe in
-[`exp_b_rfdetr/INTEGRATION.md`](exp_b_rfdetr/INTEGRATION.md). **Staged — fork only when justified:**
+### Exp B — build our own: **TipsDETR** (TIPS v2 backbone + deformable DETR)
+Our own detector, **inspired by RF-DETR but not a fork** (Apache-clean): a frozen
+**TIPS v2** ViT-L (patch-14) → a ViTDet `MultiScaleProjector` → a 4-level
+**deformable-DETR** encoder/decoder with iterative box refinement → focal class +
+box heads. Implemented and **smoke-tested** in [`tips_detr/`](tips_detr/README.md);
+multi-scale deformable attention is pure-PyTorch (no CUDA ext).
 
-- **B0 (zero fork):** stock RF-DETR on our COCO. `--coco-mode tatr` emits
-  `row / column / spanning-cell` boxes → intersect rows×cols for the logical grid (no
-  custom head, no dataloader edit). `--coco-mode cells` gives one box/cell for the
-  reconstruction route.
-- **B1 (small fork):** swap DINOv2→TIPS v2 — both patch-14 register ViTs, so projector/
-  transformer/heads are unchanged; only a `TipsV2Backbone` (`exp_b_rfdetr/tips_backbone.py`,
-  wrapping `models/tips_encoder.py`) + an encoder-enum branch. DINOv3 is a drop-in alt.
-- **B2 (additive):** per-cell `logic_embed` head + `ConvertCoco` `logic_axis` parse +
-  L1 loss — only if row×col intersection can't resolve spans.
+> Because we run **offline / batch**, we drop RF-DETR's real-time machinery
+> (windowed attention, light decoder) and instead run the **full** frozen ViT with a
+> heavier deformable decoder — accuracy over latency.
 
-**Why:** no vision-language alignment cost (a detection head needs none), pixel-accurate
-boxes, single-node; also an **auto-labeler / teacher** for A. Settle the encoder choice
-(TIPS vs DINOv3 vs MoonViT) with the cheap linear probe first. Note the resolution
-constraint: square res must be divisible by `patch_size * num_windows` (tile the ~4000px pages).
+```bash
+python -m tips_detr.smoke                         # CPU end-to-end wiring check (passes)
+torchrun --nproc_per_node=8 -m tips_detr.train \
+    --train-coco dataset/train/_annotations.coco.json --train-images dataset/train \
+    --backbone tips --tips-variant L --image-size 1568 --amp --out runs/tips_detr
+```
+
+Train on `--coco-mode tatr` (classes `table row / table column / table spanning cell`);
+at inference **intersect** row-bands × column-bands → logical cell grid, spanning-cell
+boxes fix merges (works with faint gridlines + empty cells — bands are geometric).
+Swapping TIPS → DINOv3 is a one-line backbone change. If spans can't be resolved by
+intersection, add a per-query `logic_embed` head (`--coco-mode cells` already emits
+`logic_axis`). Resolution must be a multiple of 14; **tile** ~4000px scans.
+
+**Stock-RF-DETR fallback (zero code):** if you'd rather not run our model, the same
+`--coco-mode tatr` json trains stock RF-DETR unchanged — staged notes (B0 stock → B1
+TIPS swap → B2 logic head) in [`exp_b_rfdetr/INTEGRATION.md`](exp_b_rfdetr/INTEGRATION.md).
+
+**Why Exp B at all:** no vision-language alignment cost, pixel-accurate boxes,
+single-node, permissive license; also an **auto-labeler / teacher** for A. Settle the
+encoder choice (TIPS vs DINOv3) with the cheap linear probe first.
 
 ## Repo
 
 | Path | What | Status |
 |------|------|--------|
 | `data/page_to_targets.py` | PAGE XML → ShareGPT (A) + COCO `--coco` cells/`tatr` (B) + OTSL/HTML; both PAGE flavors; empty cells kept | **done, self-test passes** |
-| `models/tips_encoder.py` | Frozen TIPS v2 encoder (HF DPT + npz paths) | scaffold (needs GPU) |
-| `exp_b_rfdetr/INTEGRATION.md` | Staged RF-DETR recipe (B0 stock → B1 TIPS swap → B2 logic head), real symbols | guide |
-| `exp_b_rfdetr/tips_backbone.py` | `TipsV2Backbone` matching RF-DETR's DinoV2 contract | scaffold (needs GPU) |
+| `tips_detr/` | **Our own TIPS v2 + deformable-DETR detector** (model, transformer, deformable attn, matcher, criterion, dataset, train, smoke) | **done, smoke + data path verified** |
+| `models/tips_encoder.py` | Frozen TIPS v2 encoder (HF DPT + npz paths), wrapped by `tips_detr` | scaffold (needs GPU) |
+| `exp_b_rfdetr/INTEGRATION.md` | Fallback: staged **stock** RF-DETR recipe (B0 → B1 → B2) | guide |
 | `eval/eval_teds.py` | TEDS structure metric (logical correctness, not box IoU) | scaffold (`pip install apted`) |
 
 ```bash
-python data/page_to_targets.py --self-test                 # verify (no deps)
-python data/page_to_targets.py *.xml --jsonl out.jsonl     # Exp A: LocateAnything ShareGPT
-python data/page_to_targets.py *.xml --coco train.json     # Exp B: RF-DETR/TIPS COCO
-python eval/eval_teds.py --self-test                       # needs apted
+python data/page_to_targets.py --self-test                       # verify (no deps)
+python data/page_to_targets.py *.xml --coco train.json --coco-mode tatr  # Exp B: TipsDETR COCO
+python -m tips_detr.smoke                                         # Exp B: model wiring (torch+scipy)
+python data/page_to_targets.py *.xml --jsonl out.jsonl           # Exp A: LocateAnything ShareGPT
+python eval/eval_teds.py --self-test                             # needs apted
 ```
 
 ## Status / next
 
 - [x] PAGE→targets converter, verified on synthetic Transkribus + PRImA XML.
 - [x] TIPS v2 encoder wrapper (from the provided code) + TEDS metric.
+- [x] **Exp B model built & verified**: `tips_detr/` (TIPS backbone + deformable DETR);
+      `smoke.py` passes (forward/loss/backward) and the COCO→dataset→train-step path runs.
 - [ ] **Validate converter on one real Transkribus PAGE export** (the earlier file
       was the archive's ABBYY OCR, not annotation — need a real PAGE sample).
+- [ ] Exp B: run on the H100 box with real TIPS v2 weights; encoder linear-probe first.
 - [ ] Exp A: LocateAnything LoRA fine-tune config on the H100 box.
-- [ ] Exp B: TIPS+DETR head + training loop; encoder linear-probe first.
 - [ ] Evaluate both with TEDS (structure-only) on a held-out set.
 
 Evaluate on the **logical** metric (cell→row/col→key-value, span accuracy), not box IoU.
